@@ -1,0 +1,84 @@
+name: Build PpidFilter
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sources
+        run: |
+          mkdir -p jni module
+          cat > module/module.prop <<'MP'
+          id=ppidfilter
+          name=Ppid Filter
+          version=v1.0
+          versionCode=1
+          author=LittleCodeSauce
+          description=fake getppid for selected packages
+          MP
+          cat > jni/CMakeLists.txt <<'CM'
+          cmake_minimum_required(VERSION 3.10)
+          project(ppidfilter CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          set(DOBBY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Dobby")
+          add_subdirectory(${DOBBY_DIR} ${CMAKE_CURRENT_BINARY_DIR}/dobby)
+          add_library(ppidfilter SHARED main.cpp)
+          target_include_directories(ppidfilter PRIVATE ${DOBBY_DIR}/include ${DOBBY_DIR})
+          target_compile_options(ppidfilter PRIVATE -Oz -fvisibility=hidden -fno-exceptions -fno-rtti)
+          target_link_libraries(ppidfilter PRIVATE dobby log)
+          set_target_properties(ppidfilter PROPERTIES PREFIX "")
+          CM
+          cat > jni/main.cpp <<'CPP'
+          #include <android/log.h>
+          #include <dlfcn.h>
+          #include <jni.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include "dobby.h"
+          #include "zygisk.hpp"
+          #define TAG "PpidFilter"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,TAG,__VA_ARGS__)
+          static const char*T[]={"com.chunqiunativecheck","com.chunqiu.appvisibilitydemo","com.maple.detect","com.eltavine.duckdetector","me.garfieldhan.holmes","com.zhenxi.hunter","icu.nullptr.nativetest","icu.nullptr.applistdetector","com.apkesujiance","luna.safe.luna","com.byxiaorun.detector"};
+          static pid_t(*o)()=nullptr;
+          static bool g=false;
+          static pid_t h(){return g?2000:(o?o():1);}
+          class M:public zygisk::ModuleBase{
+          public:
+          void onLoad(zygisk::Api*a,JNIEnv*e)override{api=a;env=e;}
+          void preAppSpecialize(zygisk::AppSpecializeArgs*args)override{
+          const char*n=args->nice_name?env->GetStringUTFChars(args->nice_name,nullptr):nullptr;
+          bool hit=false;
+          if(n)for(auto*t:T)if(strcmp(n,t)==0){hit=true;break;}
+          LOGI("pre %s hit=%d",n?n:"?",(int)hit);
+          if(n)env->ReleaseStringUTFChars(args->nice_name,n);
+          if(!hit){api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);return;}
+          void*a=dlsym(RTLD_DEFAULT,"getppid");
+          if(!a)a=dlsym(RTLD_NEXT,"getppid");
+          if(a&&!o)DobbyHook(a,(dobby_dummy_func_t)h,(dobby_dummy_func_t*)&o);
+          g=true;}
+          private:zygisk::Api*api=nullptr;JNIEnv*env=nullptr;};
+          REGISTER_ZYGISK_MODULE(M)
+          CPP
+          curl -fsSL -o jni/zygisk.hpp https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
+      - name: Dobby
+        run: git clone --depth 1 https://github.com/jmpews/Dobby Dobby
+      - uses: nttld/setup-ndk@v1
+        id: n
+        with:
+          ndk-version: r27c
+      - name: Build
+        run: |
+          cmake -B b -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ steps.n.outputs.ndk-path }}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DCMAKE_BUILD_TYPE=Release jni
+          cmake --build b -j
+      - name: Pack
+        run: |
+          mkdir -p out/zygisk
+          cp b/libppidfilter.so out/zygisk/arm64-v8a.so
+          cp module/module.prop out/
+          cd out && zip -r ../ppid.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppid
+          path: ppid.zip
