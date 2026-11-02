@@ -1,0 +1,88 @@
+name: Build PpidFilter2
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sources
+        run: |
+          mkdir -p jni module
+          cat > module/module.prop <<'MP'
+          id=ppidfilter
+          name=Ppid Filter
+          version=v1.0
+          versionCode=1
+          author=LittleCodeSauce
+          description=block getppid via seccomp for selected packages
+          MP
+          cat > jni/CMakeLists.txt <<'CM'
+          cmake_minimum_required(VERSION 3.10)
+          project(ppidfilter CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          add_library(ppidfilter SHARED main.cpp)
+          target_compile_options(ppidfilter PRIVATE -Oz -fvisibility=hidden -fno-exceptions -fno-rtti)
+          target_link_libraries(ppidfilter PRIVATE log)
+          set_target_properties(ppidfilter PROPERTIES PREFIX "")
+          CM
+          cat > jni/main.cpp <<'CPP'
+          #include <android/log.h>
+          #include <errno.h>
+          #include <jni.h>
+          #include <stddef.h>
+          #include <string.h>
+          #include <sys/prctl.h>
+          #include <sys/syscall.h>
+          #include <linux/filter.h>
+          #include <linux/seccomp.h>
+          #include "zygisk.hpp"
+          #define TAG "PpidFilter"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,TAG,__VA_ARGS__)
+          static const char*T[]={"com.chunqiunativecheck","com.chunqiu.appvisibilitydemo","com.maple.detect","com.eltavine.duckdetector","me.garfieldhan.holmes","com.zhenxi.hunter","icu.nullptr.nativetest","icu.nullptr.applistdetector","com.apkesujiance","luna.safe.luna","com.byxiaorun.detector"};
+          static void inst(){
+          struct sock_filter f[]={
+          BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data,nr)),
+          BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_getppid, 0, 1),
+          BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ERRNO|(EPERM&SECCOMP_RET_DATA)),
+          BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+          };
+          struct sock_fprog p={(unsigned short)(sizeof(f)/sizeof(f[0])),f};
+          LOGI("nnp=%d",prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+          LOGI("seccomp=%d",prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&p));
+          }
+          class M:public zygisk::ModuleBase{
+          public:
+          void onLoad(zygisk::Api*a,JNIEnv*e)override{api=a;env=e;}
+          void preAppSpecialize(zygisk::AppSpecializeArgs*args)override{
+          const char*n=args->nice_name?env->GetStringUTFChars(args->nice_name,nullptr):nullptr;
+          bool hit=false;
+          if(n)for(auto*t:T)if(strcmp(n,t)==0){hit=true;break;}
+          LOGI("pre %s hit=%d",n?n:"?",(int)hit);
+          if(n)env->ReleaseStringUTFChars(args->nice_name,n);
+          if(!hit){api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);return;}
+          inst();
+          }
+          private:zygisk::Api*api=nullptr;JNIEnv*env=nullptr;};
+          REGISTER_ZYGISK_MODULE(M)
+          CPP
+          curl -fsSL -o jni/zygisk.hpp https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp
+      - uses: nttld/setup-ndk@v1
+        id: n
+        with:
+          ndk-version: r27c
+      - name: Build
+        run: |
+          cmake -B b -G Ninja -DCMAKE_TOOLCHAIN_FILE=${{ steps.n.outputs.ndk-path }}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DCMAKE_BUILD_TYPE=Release jni
+          cmake --build b -j
+      - name: Pack
+        run: |
+          mkdir -p out/zygisk
+          cp b/libppidfilter.so out/zygisk/arm64-v8a.so
+          cp module/module.prop out/
+          cd out && zip -r ../ppid2.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppid2
+          path: ppid2.zip
